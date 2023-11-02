@@ -15,4 +15,5 @@ pip install -r requirements.txt
 
 <font color=#FF0000>Make sure you have installed the proper cuda and cudnn version.</font>
 
-You can make changes to match your version in your computer.
+You can make changes to match your version in your computer.# carAi_Ver_ros_pyTraining
+# carAi_Ver_ros_pyTraining
