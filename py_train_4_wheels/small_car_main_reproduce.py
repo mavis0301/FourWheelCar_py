@@ -8,9 +8,6 @@ import os
 import Utility
 from TCPServer import Server
 
-# from RosServer import *
-# import RosServer
-
 from Environment import Environment
 # from CustomThread import CustomThread
 from AgentDDPG import Agent
@@ -26,16 +23,19 @@ import sys
 from rclpy.node import Node
 import rclpy
 from std_msgs.msg import Float32MultiArray
-
+from std_msgs.msg import String
+from std_msgs.msg import ByteMultiArray
+import base64
 DEG2RAD = 0.01745329251
 
-unityState = list()
+unityState = ""
 
 class AiNode(Node):
     def __init__(self):
         super().__init__("aiNode")
         self.get_logger().info("Ai start")#ros2Ai #unity2Ros
-        self.subsvriber_ = self.create_subscription(Float32MultiArray, "unity2Ros", self.receive_data_from_ros, 10)
+        self.subsvriber_ = self.create_subscription(String, "unity2Ros", self.receive_data_from_ros, 10)
+        
         self.publisher_Ai2ros = self.create_publisher(Float32MultiArray, 'ros2Unity', 10)#Ai2ros #ros2Unity
         
 
@@ -46,7 +46,7 @@ class AiNode(Node):
         self.publisher_Ai2ros.publish(self.data2Ros)
 
     def receive_data_from_ros(self, msg):
-        global unityState
+        global unityState        
         unityState = msg.data
         # print(unityState)
         # self.unityState = msg.data
@@ -88,7 +88,8 @@ class Env(Environment):
 
         # print("target position: ", self.target_pos)
         # print("car position: ", self.pos)
-
+        # print("lidar direction:",state.min_lidar_direciton)
+        # print("lidar:",state.min_lidar)
         
         distance = math.dist(self.pos, self.target_pos)
         
@@ -117,6 +118,39 @@ class Env(Environment):
             or self.episode_ctr >= self.max_times_in_episode \
             or self.game_finished
         return done, self.reach_goal
+    
+    def calculateAngle(self,A, B, C):
+        # 计算向量AB和BC
+        vectorAB = [int((B[0] - A[0])*1000), int((B[1] - A[1])*1000)]
+        vectorBC = [int((C[0] - B[0])*1000), int((C[1] - B[1])*1000)]
+        print("A",vectorAB)
+        print("B",vectorBC)
+        # 如果向量AB和BC的长度为0，夹角为0度
+        if vectorAB == [0, 0] and vectorBC == [0, 0]:
+            return 0
+
+        # 计算AB和BC的长度
+        lengthAB = math.sqrt(vectorAB[0] ** 2 + vectorAB[1] ** 2)
+        lengthBC = math.sqrt(vectorBC[0] ** 2 + vectorBC[1] ** 2)
+
+        # 如果其中一个向量长度为0，夹角为180度
+        if lengthAB == 0 or lengthBC == 0:
+            return 180
+
+        # 否则，计算夹角
+        dot_product = vectorAB[0] * vectorBC[0] + vectorAB[1] * vectorBC[1]
+        cos_theta = dot_product / (lengthAB * lengthBC)
+
+        # 修正cosine值范围
+        if cos_theta < -1:
+            cos_theta = -1
+        elif cos_theta > 1:
+            cos_theta = 1
+
+        # 计算角度
+        angle_rad = math.acos(cos_theta)
+        degrees = int(angle_rad * (180 / math.pi))
+        return degrees
 
     def calculate_reward(self, state: Entity.State, new_state: Entity.State):
         reward = 0
@@ -124,12 +158,17 @@ class Env(Environment):
         self.pos = [new_state.car_pos.x, new_state.car_pos.y]
         self.prev_pos = [state.car_pos.x, state.car_pos.y]
 
+
         self.carOrientation = Utility.rad2deg(new_state.car_orientation)
         prevCarOrientation = Utility.rad2deg(state.car_orientation)
 
         target_pos = [state.final_target_pos.x , state.final_target_pos.y]
 
         self.targetOrientation = Utility.rad2deg(Utility.radFromUp(self.pos, target_pos))
+
+        anchordis=state.min_lidar
+        # print(state.min_lidar)
+        
 
         ### distance to final target
         prevTargetDist = self.calculate_distance(self.prev_pos, target_pos)
@@ -142,22 +181,46 @@ class Env(Environment):
             reward -= distanceDiff*800
         elif distanceDiff > 3:
             reward -= distanceDiff*300 
-        elif distanceDiff < 3:
-            reward += distanceDiff*200
-        elif distanceDiff < 2.5:
-            reward += distanceDiff*400
+        elif distanceDiff < 0:
+            reward -= distanceDiff*200
+        # elif distanceDiff < 3:
+        #     reward += distanceDiff*200
+        # elif distanceDiff < 2.5:
+        #     reward += distanceDiff*400
         
         if distanceDiff > 0:
             distanceDiff *= 2
             distanceDiff *= 400
             reward -= distanceDiff
-        elif distanceDiff < 0:
-            reward += 100*-(distanceDiff)
+            print('diff:',distanceDiff,end="")
+        # elif distanceDiff < 0:
+        #     reward += 100*-(distanceDiff)
 
-        if distanceToTarget < 10:
-            reword += 2000/distanceToTarget
+        
+        # elif distanceToTarget < 5:
+        #     reward += 300
         
 
+        # angle = self.calculateAngle(self.prev_pos,self.pos,target_pos)
+        # targetAngleDiff = angle
+        # print("angle", angle)
+
+        # reward -= targetAngleDiff
+        
+        if len(anchordis)>0 : 
+            close = min(anchordis)
+            print('anchor:',close)
+            if close < 0.5:
+                reward -= 20000
+                print('toooo close')
+            elif close < 1.5:
+                reward -= (2-close)*600
+                print('too close')
+            
+        
+        if distanceToTarget < 1.5:
+            print('right')
+            reward += 300
         
             
         
@@ -174,6 +237,8 @@ class Env(Environment):
         if targetAngleDiff > 0:
             targetAngleDiff *= 4
         reward += -targetAngleDiff
+        print('prevTargetOrientation:',prevTargetOrientation,'prevAngleGapToTarget:',prevAngleGapToTarget)
+        print('TargetOrientation:',TargetOrientation,'angleGapToTarget:',angleGapToTarget,'targetAngleDiff:',targetAngleDiff)
  
     
 
@@ -265,16 +330,17 @@ class Agt(Agent):
         # print(state.car_angular_vel)
 
         # 前進軸 angular velocity in radians *4 --> *1
-
-        feature.append(state.wheel_angular_vel.left_back)
-        feature.append(state.wheel_angular_vel.right_back)
-        feature.append(state.wheel_angular_vel.left_front)
         feature.append(state.wheel_angular_vel.right_front)
-
-        feature.append(state.action_wheel_angular_vel.left_back)
-        feature.append(state.action_wheel_angular_vel.right_back)
-        feature.append(state.action_wheel_angular_vel.left_front)
+        feature.append(state.wheel_angular_vel.left_front)
+        feature.append(state.wheel_angular_vel.right_back)
+        feature.append(state.wheel_angular_vel.left_back)
+        
         feature.append(state.action_wheel_angular_vel.right_front)
+        feature.append(state.action_wheel_angular_vel.left_front)
+        feature.append(state.action_wheel_angular_vel.right_back)
+        feature.append(state.action_wheel_angular_vel.left_back)
+        
+        
 
         
 
@@ -294,22 +360,22 @@ def main(mode):
     env = Env(max_times_in_episode=10, max_times_in_game=210, end_distance=(0.2, 7), stop_target=False, target_fixed_sec=12)
   
     # 0518_car_to_target_few_features 0517_car_to_target_few_features
-    chpt_dir_load = os.path.join(os.path.dirname(__file__),  'Model', 'DDPG', '0623_car_to_target_slow_retrain_double_prev_/model') #0623_car_to_target_slow_retrain_double_prev_wheel_d_05 0621_car_to_target_slow_retrain_double_prev_wheel_d_05 0613_car_to_target_slow_retrain_double_prev:5000 0601_car_to_target_test_1
-    chpt_dir_save = os.path.join(os.path.dirname(__file__),  'Model', 'DDPG', '0809_car/model')
-    chpt_dir_plot = os.path.join(os.path.dirname(__file__),  'Model', 'DDPG', '0809_car/')
-    chpt_dir_log  = os.path.join(os.path.dirname(__file__),  'Model', 'DDPG', '0809_car/log')
+    chpt_dir_load = os.path.join(os.path.dirname(__file__),  'Model', 'DDPG', '1109/model') #0623_car_to_target_slow_retrain_double_prev_wheel_d_05 0621_car_to_target_slow_retrain_double_prev_wheel_d_05 0613_car_to_target_slow_retrain_double_prev:5000 0601_car_to_target_test_1
+    chpt_dir_save = os.path.join(os.path.dirname(__file__),  'Model', 'DDPG', '1109/model')
+    chpt_dir_plot = os.path.join(os.path.dirname(__file__),  'Model', 'DDPG', '1109/')
+    chpt_dir_log  = os.path.join(os.path.dirname(__file__),  'Model', 'DDPG', '1109/log')
     # chpt_dir_buffer = os.path.join(os.path.dirname(__file__), '..', '..', 'Model', 'DDPG', '0709_car_to_target_slow_retrain_double_prev_/buffer')
 
     agent = Agt(q_lr=0.001, pi_lr=0.001, gamma=0.99, rho=0.005,  \
         pretrained=False, new_input_dims=17, \
-        input_dims=17, n_actions=2, batch_size=100, layer1_size=400, layer2_size=300, \
+        input_dims=17, n_actions=4, batch_size=100, layer1_size=400, layer2_size=300, \
         
         chpt_dir_load=chpt_dir_load, chpt_dir_save=chpt_dir_save)
     # replay_buffer_size=1000000, !! test\rclpy.init()
 
     
 
-    epoch = 5000
+    epoch = 10000
 
     reward_history, reward_history_ = ([] for i in range(2))
 
@@ -325,13 +391,14 @@ def main(mode):
                 wheel_orientation=Entity.WheelOrientation(left_front=0.0, right_front=0.0),
                 car_angular_vel=0.0,
                 wheel_angular_vel=Entity.WheelAngularVel(left_back=0.0, left_front=0.0, right_back=0.0, right_front=0.0),
-                min_lidar=0.0,
+                min_lidar=[],
                 min_lidar_position=Entity.ROS2Point(x=0.0, y=0.0, z=0.0),
                 second_min_lidar_position=Entity.ROS2Point(x=0.0, y=0.0, z=0.0),
                 third_min_lidar_position=Entity.ROS2Point(x=0.0, y=0.0, z=0.0),
                 max_lidar=0.0,
+                min_lidar_direciton = [0.0],
                 # min_lidar_direciton=Entity.ROS2Point(x=0.0, y=0.0, z=0.0),
-                max_lidar_position=Entity.ROS2Point(x=0.0, y=0.0, z=0.0),
+                # max_lidar_position=Entity.ROS2Point(x=0.0, y=0.0, z=0.0),
                 # min_lidar_relative_angle=0.0,
                 action_wheel_angular_vel=Entity.WheelAngularVel(left_back=0.0, left_front=0.0, right_back=0.0, right_front=0.0),
                 action_wheel_orientation=Entity.WheelOrientation(left_front=0.0, right_front=0.0))
